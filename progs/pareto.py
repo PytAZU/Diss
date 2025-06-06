@@ -4,96 +4,159 @@ from deap import base, creator, tools, algorithms
 from scipy.integrate import dblquad
 
 # ==== Границы переменных ====
-AREA_MIN, AREA_MAX = 0.001, 0.1      # площадь, м^2
-ALPHA_MIN, ALPHA_MAX = 0, np.pi/2    # угол падения, радиан
-BETA_MIN, BETA_MAX = 0, np.pi/2      # угол beta, радиан
-GAMMA_MIN, GAMMA_MAX = 0, np.pi/2    # угол gamma, радиан
-THETA_MIN, THETA_MAX = 0, np.pi/2    # угол поворота, радиан
-I0_MIN, I0_MAX = 0.5, 2.0
+W_MIN, W_MAX = 0.01, 0.5         # ширина, м
+H_MIN, H_MAX = 0.01, 0.25        # высота, м
+P_MIN, P_MAX = 0.005, 0.05       # шаг, м
+AREA_MIN, AREA_MAX = 0.001, 0.1  # площадь, м^2
+ALPHA_MIN, ALPHA_MAX = 0, np.pi/2
+BETA_MIN, BETA_MAX = 0, np.pi/2
+GAMMA_MIN, GAMMA_MAX = 0, np.pi/2
+THETA_MIN, THETA_MAX = 0, np.pi/2
+I0_MIN, I0_MAX = 200, 1274.0
 OMEGA_MIN, OMEGA_MAX = 0.5, 2.0
-P0_MIN, P0_MAX = 0.5, 2.0
-C_MIN, C_MAX = 0.0, 1.0
-B_MIN, B_MAX = -1.0, 1.0
+P0_MIN, P0_MAX = 0.5, 2000.0
+LAMBDA_MIN, LAMBDA_MAX = 0.4e-6, 2e-6  # длина волны, м
+Z_MIN, Z_MAX = 0.01, 1.0               # расстояние до фотоприёмника, м
+W0_MIN, W0_MAX = 0.001, 0.02           # минимальная ширина пучка, м
+X0_MIN, X0_MAX = -0.05, 0.05           # координата центра по x, м
+Y0_MIN, Y0_MAX = -0.05, 0.05           # координата центра по y, м
 
-# ==== ВАШИ ФУНКЦИИ ====
-def my_efficiency(area, alpha, beta, gamma, theta, I0, omega, P0, C, B_vec):
-    """Расчет полного КПД по вашей формуле с учетом матрицы R и A"""
-    # Коэффициенты отражения (замените на свои формулы при необходимости)
+def my_area(W, H, p):
+    if p <= 0 or W <= 0 or H <= 0:
+        return 0.0
+    Nw = int(W // p)
+    Nh = int(H // p)
+    if Nw < 1 or Nh < 1:
+        return 0.0
+    N = Nw * Nh
+    area = N * p * p
+    return area
+
+def my_efficiency(area, alpha, beta, gamma, theta, I0, omega, P0, 
+                  x0, y0, w0, z, lambda_):
+    if area < 1e-7 or not np.isfinite(area):
+        return 0.0
+
     Rs_theta = 0.1
     Rp_theta = 0.05
-    # Аналитическая часть
+
     part1 = np.cos(theta) * ((1 - Rs_theta) * np.cos(alpha)**2 + (1 - Rp_theta) * np.sin(alpha)**2)
-    # Формируем матрицу R (3x3)
+
     R = np.array([
-        [np.cos(alpha)*np.cos(beta), np.cos(alpha)*np.sin(beta)*np.sin(gamma) - np.sin(alpha)*np.cos(gamma), np.cos(alpha)*np.sin(beta)*np.cos(gamma) + np.sin(alpha)*np.sin(gamma)],
-        [np.sin(alpha)*np.cos(beta), np.sin(alpha)*np.sin(beta)*np.sin(gamma) + np.cos(alpha)*np.cos(gamma), np.sin(alpha)*np.sin(beta)*np.cos(gamma) - np.cos(alpha)*np.sin(gamma)],
-        [-np.sin(beta), np.cos(beta)*np.sin(gamma), np.cos(beta)*np.cos(gamma)]
+        [np.cos(alpha)*np.cos(beta),
+         np.cos(alpha)*np.sin(beta)*np.sin(gamma) - np.sin(alpha)*np.cos(gamma),
+         np.cos(alpha)*np.sin(beta)*np.cos(gamma) + np.sin(alpha)*np.sin(gamma)],
+        [np.sin(alpha)*np.cos(beta),
+         np.sin(alpha)*np.sin(beta)*np.sin(gamma) + np.cos(alpha)*np.cos(gamma),
+         np.sin(alpha)*np.sin(beta)*np.cos(gamma) - np.cos(alpha)*np.sin(gamma)],
+        [-np.sin(beta),
+         np.cos(beta)*np.sin(gamma),
+         np.cos(beta)*np.cos(gamma)]
     ])
-    # Формируем матрицу A (2x2) по вашей формуле
     R11, R12, R21, R22 = R[0,0], R[0,1], R[1,0], R[1,1]
+    B_vec = np.array([
+        R11 * x0 + R12 * y0,
+        R21 * x0 + R22 * y0
+    ])
+    C_val = x0**2 + y0**2
+
     A_mat = np.array([
         [R11**2 + R12**2, R11*R21 + R12*R22],
         [R11*R21 + R12*R22, R21**2 + R22**2]
     ])
     try:
+        detA = np.linalg.det(A_mat)
+    except:
+        return 0.0
+    if detA < 1e-8 or not np.isfinite(detA):
+        return 0.0
+    try:
         A_inv = np.linalg.inv(A_mat)
     except np.linalg.LinAlgError:
-        A_inv = np.eye(2)
-    detA = np.linalg.det(A_mat)
-    BTAinvB = np.dot(B_vec.T, np.dot(A_inv, B_vec))
-    geom_factor = (I0 * omega**2) / (2 * P0 * np.sqrt(detA)) * np.exp(-2 * (C - BTAinvB) / omega**2)
-    # Пределы интегрирования по площади: квадрат со стороной a = sqrt(area)
+        return 0.0
+    try:
+        BTAinvB = np.dot(B_vec.T, np.dot(A_inv, B_vec))
+    except:
+        return 0.0
+
+    if omega == 0 or P0 == 0:
+        return 0.0
+
+    zr = np.pi * w0 ** 2 / lambda_
+    w_z = w0 * np.sqrt(1 + (z / zr) ** 2)
+
+    try:
+        val_exp = -2 * (C_val - BTAinvB) / (omega**2)
+        if val_exp < -700:
+            exp_val = 0.0
+        elif val_exp > 700:
+            return 0.0
+        else:
+            exp_val = np.exp(val_exp)
+        geom_factor = (I0 * omega**2) / (2 * P0 * np.sqrt(detA)) * exp_val
+    except:
+        return 0.0
+
     a = np.sqrt(area)
     u1_min, u1_max = -a/2, a/2
     u2_min, u2_max = -a/2, a/2
-    # Численный интеграл
-    def integrand(u1, u2):
-        return np.exp(-u1**2 - u2**2)
-    integral, _ = dblquad(
-        lambda u2, u1: integrand(u1, u2),
-        u1_min, u1_max,
-        lambda u1: u2_min,
-        lambda u1: u2_max
-    )
-    # Итоговый КПД
+
+    try:
+        integral, _ = dblquad(
+            lambda u2, u1: np.exp(-2 * ((u1**2 + u2**2)/(w_z ** 2))),
+            u1_min, u1_max,
+            lambda u1: u2_min,
+            lambda u1: u2_max
+        )
+    except Exception:
+        return 0.0
+
     eta = part1 * geom_factor * integral
+    if not np.isfinite(eta) or eta < 0 or eta > 1:
+        return 0.0
     return eta
 
-def my_area(area):
-    """Замените на свою функцию площади, если она зависит от других переменных"""
-    return area
-
-def my_cost(area):
-    """Замените на свою функцию стоимости"""
-    base_cost = 500
-    return base_cost + 2000 * area
-
-# ==== Целевая функция ====
 def evaluate(ind):
-    area = ind[0]
-    alpha = ind[1]
-    beta = ind[2]
-    gamma = ind[3]
-    theta = ind[4]
-    I0 = ind[5]
-    omega = ind[6]
-    P0 = ind[7]
-    C = ind[8]
-    B1 = ind[9]
-    B2 = ind[10]
-    B_vec = np.array([B1, B2])
-    eff = my_efficiency(area, alpha, beta, gamma, theta, I0, omega, P0, C, B_vec)
-    area_val = my_area(area)
-    cost_val = my_cost(area)
-    # КПД максимизируем, остальные минимизируем
-    return (-eff, area_val, cost_val)
+    W      = ind[0]
+    H      = ind[1]
+    p      = ind[2]
+    alpha  = ind[3]
+    beta   = ind[4]
+    gamma  = ind[5]
+    theta  = ind[6]
+    I0     = ind[7]
+    omega  = ind[8]
+    P0     = ind[9]
+    lambda_ = ind[10]
+    z       = ind[11]
+    w0      = ind[12]
+    x0      = ind[13]
+    y0      = ind[14]
 
-# ==== Настройка DEAP ====
-creator.create("FitnessMulti", base.Fitness, weights=(1.0, -1.0, -1.0))
+    if (W > W_MAX or W < W_MIN or H > H_MAX or H < H_MIN or p > P_MAX or p < P_MIN or
+        lambda_ < LAMBDA_MIN or lambda_ > LAMBDA_MAX or
+        w0 < W0_MIN or w0 > W0_MAX or z < Z_MIN or z > Z_MAX or
+        x0 < X0_MIN or x0 > X0_MAX or y0 < Y0_MIN or y0 > Y0_MAX):
+        return (1e6, 1e6)
+
+    area_val = my_area(W, H, p)
+    if area_val < AREA_MIN or area_val > AREA_MAX or not np.isfinite(area_val):
+        return (1e6, 1e6)
+
+    eff = my_efficiency(area_val, alpha, beta, gamma, theta, I0, omega, P0,
+                        x0, y0, w0, z, lambda_)
+    if not np.isfinite(eff) or eff <= 0 or eff > 1:
+        return (1e6, 1e6)
+
+    return (-eff, area_val)
+
+creator.create("FitnessMulti", base.Fitness, weights=(1.0, -1.0))
 creator.create("Individual", list, fitness=creator.FitnessMulti)
 
 toolbox = base.Toolbox()
-toolbox.register("attr_area", np.random.uniform, AREA_MIN, AREA_MAX)
+toolbox.register("attr_W", np.random.uniform, W_MIN, W_MAX)
+toolbox.register("attr_H", np.random.uniform, H_MIN, H_MAX)
+toolbox.register("attr_p", np.random.uniform, P_MIN, P_MAX)
 toolbox.register("attr_alpha", np.random.uniform, ALPHA_MIN, ALPHA_MAX)
 toolbox.register("attr_beta", np.random.uniform, BETA_MIN, BETA_MAX)
 toolbox.register("attr_gamma", np.random.uniform, GAMMA_MIN, GAMMA_MAX)
@@ -101,63 +164,45 @@ toolbox.register("attr_theta", np.random.uniform, THETA_MIN, THETA_MAX)
 toolbox.register("attr_I0", np.random.uniform, I0_MIN, I0_MAX)
 toolbox.register("attr_omega", np.random.uniform, OMEGA_MIN, OMEGA_MAX)
 toolbox.register("attr_P0", np.random.uniform, P0_MIN, P0_MAX)
-toolbox.register("attr_C", np.random.uniform, C_MIN, C_MAX)
-toolbox.register("attr_B1", np.random.uniform, B_MIN, B_MAX)
-toolbox.register("attr_B2", np.random.uniform, B_MIN, B_MAX)
-toolbox.register("individual", tools.initCycle, creator.Individual,
-                 (toolbox.attr_area, toolbox.attr_alpha, toolbox.attr_beta, toolbox.attr_gamma, toolbox.attr_theta,
-                  toolbox.attr_I0, toolbox.attr_omega, toolbox.attr_P0, toolbox.attr_C,
-                  toolbox.attr_B1, toolbox.attr_B2), n=1)
-toolbox.register("population", tools.initRepeat, list, toolbox.individual)
+toolbox.register("attr_lambda", np.random.uniform, LAMBDA_MIN, LAMBDA_MAX)
+toolbox.register("attr_z", np.random.uniform, Z_MIN, Z_MAX)
+toolbox.register("attr_w0", np.random.uniform, W0_MIN, W0_MAX)
+toolbox.register("attr_x0", np.random.uniform, X0_MIN, X0_MAX)
+toolbox.register("attr_y0", np.random.uniform, Y0_MIN, Y0_MAX)
 
+toolbox.register("individual", tools.initCycle, creator.Individual,
+                 (toolbox.attr_W, toolbox.attr_H, toolbox.attr_p, toolbox.attr_alpha, toolbox.attr_beta, toolbox.attr_gamma,
+                  toolbox.attr_theta, toolbox.attr_I0, toolbox.attr_omega, toolbox.attr_P0, toolbox.attr_lambda,
+                  toolbox.attr_z, toolbox.attr_w0, toolbox.attr_x0, toolbox.attr_y0), n=1)
+toolbox.register("population", tools.initRepeat, list, toolbox.individual)
 toolbox.register("mate", tools.cxBlend, alpha=0.5)
 toolbox.register("mutate", tools.mutGaussian, mu=0, sigma=0.01, indpb=0.3)
 toolbox.register("select", tools.selNSGA2)
 toolbox.register("evaluate", evaluate)
 
-# ==== Основной цикл ====
 def main():
-    pop = toolbox.population(n=100)
+    pop = toolbox.population(n=1000)
     hof = tools.ParetoFront()
     stats = tools.Statistics(lambda ind: ind.fitness.values)
     stats.register("avg", np.mean, axis=0)
     stats.register("min", np.min, axis=0)
     stats.register("max", np.max, axis=0)
 
-    algorithms.eaMuPlusLambda(pop, toolbox, mu=200, lambda_=400, cxpb=0.7, mutpb=0.3, ngen=100,
-                             stats=stats, halloffame=hof, verbose=True)
+    algorithms.eaMuPlusLambda(pop, toolbox, mu=1000, lambda_=2000, cxpb=0.7, mutpb=0.3, ngen=50,
+                              stats=stats, halloffame=hof, verbose=True)
 
-    # ==== Сбор данных для графика ====
     effs = []
     areas = []
-    costs = []
     for ind in hof:
-        eff, area, cost = ind.fitness.values
-        effs.append(-eff)  # Минус, чтобы КПД был положительным
+        eff, area = ind.fitness.values
+        effs.append(-eff)
         areas.append(area)
-        costs.append(cost)
 
-    # ==== График Парето-множества ====
-    # 2d: КПД vs площадь
     plt.figure(figsize=(8,6))
-    plt.scatter(areas, effs, c=costs, cmap='viridis', s=40)
+    plt.scatter(areas, effs, s=40)
     plt.xlabel("Площадь фотоприёмника, м²")
     plt.ylabel("КПД")
-    plt.title("Парето-множество: КПД vs Площадь (цвет = стоимость)")
-    cbar = plt.colorbar()
-    cbar.set_label('Стоимость')
-    plt.tight_layout()
-    plt.show()
-
-    # 3d: КПД vs площадь vs стоимость
-    from mpl_toolkits.mplot3d import Axes3D
-    fig = plt.figure(figsize=(10,8))
-    ax = fig.add_subplot(111, projection='3d')
-    ax.scatter(areas, effs, costs, c=effs, cmap='plasma')
-    ax.set_xlabel('Площадь, м²')
-    ax.set_ylabel('КПД')
-    ax.set_zlabel('Стоимость')
-    plt.title("Парето-множество (3D)")
+    plt.title("Парето-множество: КПД vs Площадь")
     plt.tight_layout()
     plt.show()
 
